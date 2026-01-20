@@ -39,9 +39,9 @@ class Goal(Geom):  # pylint: disable=too-many-instance-attributes
     # if reward_distance is 0, then the reward function is sparse
     reward_distance: float = 1.0  # Dense reward multiplied by the distance moved to the goal
 
-    color: np.ndarray = COLOR['goal']
+    color: np.ndarray = field(default_factory=lambda: np.array(COLOR['goal'], copy=True))
     alpha: float = 0.25
-    group: np.ndarray = GROUP['goal']
+    group: np.ndarray = field(default_factory=lambda: np.array(GROUP['goal'], copy=True))
     is_lidar_observed: bool = True
     is_comp_observed: bool = False
     is_constrained: bool = False

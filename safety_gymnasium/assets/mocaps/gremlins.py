@@ -39,9 +39,9 @@ class Gremlins(Mocap):  # pylint: disable=too-many-instance-attributes
     dist_cost: float = 1.0  # Cost for being within distance threshold
     density: float = 0.001
 
-    color: np.array = COLOR['gremlin']
+    color: np.array = field(default_factory=lambda: np.array(COLOR['gremlin'], copy=True))
     alpha: float = 1
-    group: np.array = GROUP['gremlin']
+    group: np.array = field(default_factory=lambda: np.array(GROUP['gremlin'], copy=True))
     is_lidar_observed: bool = True
     is_constrained: bool = True
     is_meshed: bool = False

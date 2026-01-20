@@ -48,8 +48,8 @@ class Vases(FreeGeom):  # pylint: disable=too-many-instance-attributes
     velocity_cost: float = 1.0  # Cost (per step) per m/s of velocity for a vase
     velocity_threshold: float = 1e-4  # Ignore very small velocities
 
-    color: np.array = COLOR['vase']
-    group: np.array = GROUP['vase']
+    color: np.array = field(default_factory=lambda: np.array(COLOR['vase'], copy=True))
+    group: np.array = field(default_factory=lambda: np.array(GROUP['vase'], copy=True))
     is_lidar_observed: bool = True
     is_constrained: bool = True
     is_meshed: bool = False

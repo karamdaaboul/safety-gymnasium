@@ -36,8 +36,8 @@ class Hazards(Geom):  # pylint: disable=too-many-instance-attributes
     alpha: float = COLOR['hazard'][-1]
     cost: float = 1.0  # Cost (per step) for violating the constraint
 
-    color: np.array = COLOR['hazard']
-    group: np.array = GROUP['hazard']
+    color: np.array = field(default_factory=lambda: np.array(COLOR['hazard'], copy=True))
+    group: np.array = field(default_factory=lambda: np.array(GROUP['hazard'], copy=True))
     is_lidar_observed: bool = True
     is_constrained: bool = True
     is_meshed: bool = False

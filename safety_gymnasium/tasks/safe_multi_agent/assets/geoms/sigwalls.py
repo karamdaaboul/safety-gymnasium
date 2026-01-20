@@ -14,7 +14,7 @@
 # ==============================================================================
 """Hazard."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -34,8 +34,8 @@ class Sigwalls(Geom):  # pylint: disable=too-many-instance-attributes
     placements: list = None
     keepout: float = 0.0
 
-    color: np.array = COLOR['sigwall']
-    group: np.array = GROUP['sigwall']
+    color: np.array = field(default_factory=lambda: np.array(COLOR['sigwall'], copy=True))
+    group: np.array = field(default_factory=lambda: np.array(GROUP['sigwall'], copy=True))
     is_lidar_observed: bool = False
     is_constrained: bool = False
 

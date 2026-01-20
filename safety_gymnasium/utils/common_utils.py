@@ -40,7 +40,10 @@ def convert(value):
     if isinstance(value, (int, float, str)):
         return str(value)
     # Numpy arrays and lists
-    return ' '.join(str(i) for i in np.asarray(value))
+    array = np.asarray(value)
+    if array.ndim == 0:
+        return str(array.item())
+    return ' '.join(str(i) for i in array)
 
 
 def rot2quat(theta):

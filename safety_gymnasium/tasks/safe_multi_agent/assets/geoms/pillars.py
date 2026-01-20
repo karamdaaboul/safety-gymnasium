@@ -36,8 +36,8 @@ class Pillars(Geom):  # pylint: disable=too-many-instance-attributes
     keepout: float = 0.3  # Radius for placement of pillars
     cost: float = 1.0  # Cost (per step) for being in contact with a pillar
 
-    color: np.array = COLOR['pillar']
-    group: np.array = GROUP['pillar']
+    color: np.array = field(default_factory=lambda: np.array(COLOR['pillar'], copy=True))
+    group: np.array = field(default_factory=lambda: np.array(GROUP['pillar'], copy=True))
     is_lidar_observed: bool = True
     is_constrained: bool = True
 

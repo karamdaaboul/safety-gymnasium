@@ -44,9 +44,9 @@ class Apples(Geom):  # pylint: disable=too-many-instance-attributes
     # if reward_distance is 0, then the reward function is sparse
     reward_distance: float = 1.0  # Dense reward multiplied by the distance moved to the goal
 
-    color: np.array = COLOR['apple']
+    color: np.array = field(default_factory=lambda: np.array(COLOR['apple'], copy=True))
     alpha: float = 0.25
-    group: np.array = GROUP['apple']
+    group: np.array = field(default_factory=lambda: np.array(GROUP['apple'], copy=True))
     is_lidar_observed: bool = True
     is_constrained: bool = False
     is_meshed: bool = False
