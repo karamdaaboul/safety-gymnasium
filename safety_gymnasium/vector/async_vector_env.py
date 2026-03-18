@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import sys
+import traceback
 from copy import deepcopy
 from multiprocessing import connection
 from typing import Sequence
@@ -102,7 +103,8 @@ class SafetyAsyncVectorEnv(AsyncVectorEnv):
             )
 
         # wait for the results.
-        if not self._poll(timeout):
+        poll_fn = getattr(self, '_poll_pipe_envs', None) or getattr(self, '_poll')
+        if not poll_fn(timeout):
             self._state = AsyncState.DEFAULT
             raise mp.TimeoutError(
                 f'The call to `step_wait` has timed out after {timeout} second(s).',
@@ -116,12 +118,13 @@ class SafetyAsyncVectorEnv(AsyncVectorEnv):
             obs, rew, cost, terminated, truncated, info = result
 
             successes.append(success)
-            observations_list.append(obs)
-            rewards.append(rew)
-            costs.append(cost)
-            terminateds.append(terminated)
-            truncateds.append(truncated)
-            infos = self._add_info(infos, info, idx)
+            if success:
+                observations_list.append(obs)
+                rewards.append(rew)
+                costs.append(cost)
+                terminateds.append(terminated)
+                truncateds.append(truncated)
+                infos = self._add_info(infos, info, idx)
 
         # check if there are any errors.
         self._raise_if_errors(successes)
@@ -144,7 +147,6 @@ class SafetyAsyncVectorEnv(AsyncVectorEnv):
         )
 
 
-# pylint: disable-next=too-many-arguments,too-many-locals,too-many-branches
 def _worker(
     index: int,
     env_fn: callable,
@@ -152,9 +154,9 @@ def _worker(
     parent_pipe: connection.Connection,
     shared_memory: bool,
     error_queue: mp.Queue,
+    autoreset_mode=None,
 ) -> None:
     """The worker function for the async vector environment."""
-    assert shared_memory is None
     env = env_fn()
     parent_pipe.close()
     try:
@@ -163,71 +165,54 @@ def _worker(
             if command == 'reset':
                 observation, info = env.reset(**data)
                 pipe.send(((observation, info), True))
+            elif command == 'reset-noop':
+                pipe.send(((None, {}), True))
             elif command == 'step':
-                (
-                    observation,
-                    reward,
-                    cost,
-                    terminated,
-                    truncated,
-                    info,
-                ) = env.step(data)
+                observation, reward, cost, terminated, truncated, info = env.step(data)
                 if terminated or truncated:
                     old_observation, old_info = observation, info
                     observation, info = env.reset()
                     info['final_observation'] = old_observation
                     info['final_info'] = old_info
                 pipe.send(((observation, reward, cost, terminated, truncated, info), True))
-            elif command == 'seed':
-                env.seed(data)
-                pipe.send((None, True))
-            elif command == 'render':
-                pipe.send(env.render())
             elif command == 'close':
                 pipe.send((None, True))
                 break
             elif command == '_call':
                 name, args, kwargs = data
-                if name in ['reset', 'step', 'seed', 'close']:
+                if name in ['reset', 'step', 'close', '_setattr', '_check_spaces']:
                     raise ValueError(
-                        (
-                            f'Trying to call function `{name}` with `_call`. '
-                            f'Use `{name}` directly instead.'
-                        ),
+                        f'Trying to call function `{name}` with `call`, use `{name}` directly instead.',
                     )
-                function = getattr(env, name)
-                if callable(function):
-                    pipe.send((function(*args, **kwargs), True))
+                attr = env.get_wrapper_attr(name) if hasattr(env, 'get_wrapper_attr') else getattr(env, name)
+                if callable(attr):
+                    pipe.send((attr(*args, **kwargs), True))
                 else:
-                    pipe.send((function, True))
+                    pipe.send((attr, True))
             elif command == '_setattr':
                 name, value = data
-                setattr(env, name, value)
+                if hasattr(env, 'set_wrapper_attr'):
+                    env.set_wrapper_attr(name, value)
+                else:
+                    setattr(env, name, value)
                 pipe.send((None, True))
             elif command == '_check_spaces':
+                obs_mode, single_obs_space, single_action_space = data
                 pipe.send(
-                    (
-                        (data[0] == env.observation_space, data[1] == env.action_space),
-                        True,
-                    ),
+                    ((single_obs_space == env.observation_space, single_action_space == env.action_space), True),
                 )
             else:
-                raise RuntimeError(
-                    (
-                        f'Received unknown command `{command}`. '
-                        'Must be one of {`reset`, `step`, `seed`, `close`, `render`, `_call`, '
-                        '`_setattr`, `_check_spaces`}.'
-                    ),
-                )
+                raise RuntimeError(f'Received unknown command `{command}`.')
     # pylint: disable-next=broad-except
     except (KeyboardInterrupt, Exception):
-        error_queue.put((index,) + sys.exc_info()[:2])
+        error_type, error_message, _ = sys.exc_info()
+        trace = traceback.format_exc()
+        error_queue.put((index, error_type, error_message, trace))
         pipe.send((None, False))
     finally:
         env.close()
 
 
-# pylint: disable-next=too-many-arguments,too-many-locals,too-many-branches,too-many-statements
 def _worker_shared_memory(
     index: int,
     env_fn: callable,
@@ -235,9 +220,9 @@ def _worker_shared_memory(
     parent_pipe: connection.Connection,
     shared_memory: bool,
     error_queue: mp.Queue,
+    autoreset_mode=None,
 ) -> None:
     """The shared memory version of worker function for the async vector environment."""
-    assert shared_memory is not None
     env = env_fn()
     observation_space = env.observation_space
     parent_pipe.close()
@@ -248,15 +233,10 @@ def _worker_shared_memory(
                 observation, info = env.reset(**data)
                 write_to_shared_memory(observation_space, index, observation, shared_memory)
                 pipe.send(((None, info), True))
+            elif command == 'reset-noop':
+                pipe.send(((None, {}), True))
             elif command == 'step':
-                (
-                    observation,
-                    reward,
-                    cost,
-                    terminated,
-                    truncated,
-                    info,
-                ) = env.step(data)
+                observation, reward, cost, terminated, truncated, info = env.step(data)
                 if terminated or truncated:
                     old_observation, old_info = observation, info
                     observation, info = env.reset()
@@ -264,45 +244,39 @@ def _worker_shared_memory(
                     info['final_info'] = old_info
                 write_to_shared_memory(observation_space, index, observation, shared_memory)
                 pipe.send(((None, reward, cost, terminated, truncated, info), True))
-            elif command == 'render':
-                pipe.send(env.render())
-            elif command == 'seed':
-                env.seed(data)
-                pipe.send((None, True))
             elif command == 'close':
                 pipe.send((None, True))
                 break
             elif command == '_call':
                 name, args, kwargs = data
-                if name in ['reset', 'step', 'seed', 'close']:
+                if name in ['reset', 'step', 'close', '_setattr', '_check_spaces']:
                     raise ValueError(
-                        (
-                            f'Trying to call function `{name}` with `_call`. '
-                            f'Use `{name}` directly instead.'
-                        ),
+                        f'Trying to call function `{name}` with `call`, use `{name}` directly instead.',
                     )
-                function = getattr(env, name)
-                if callable(function):
-                    pipe.send((function(*args, **kwargs), True))
+                attr = env.get_wrapper_attr(name) if hasattr(env, 'get_wrapper_attr') else getattr(env, name)
+                if callable(attr):
+                    pipe.send((attr(*args, **kwargs), True))
                 else:
-                    pipe.send((function, True))
+                    pipe.send((attr, True))
             elif command == '_setattr':
                 name, value = data
-                setattr(env, name, value)
+                if hasattr(env, 'set_wrapper_attr'):
+                    env.set_wrapper_attr(name, value)
+                else:
+                    setattr(env, name, value)
                 pipe.send((None, True))
             elif command == '_check_spaces':
-                pipe.send(((data[0] == observation_space, data[1] == env.action_space), True))
-            else:
-                raise RuntimeError(
-                    (
-                        f'Received unknown command `{command}`. '
-                        'Must be one of {`reset`, `step`, `seed`, `close`, `render`, `_call`, '
-                        '`_setattr`, `_check_spaces`}.'
-                    ),
+                obs_mode, single_obs_space, single_action_space = data
+                pipe.send(
+                    ((single_obs_space == observation_space, single_action_space == env.action_space), True),
                 )
+            else:
+                raise RuntimeError(f'Received unknown command `{command}`.')
     # pylint: disable-next=broad-except
     except (KeyboardInterrupt, Exception):
-        error_queue.put((index,) + sys.exc_info()[:2])
+        error_type, error_message, _ = sys.exc_info()
+        trace = traceback.format_exc()
+        error_queue.put((index, error_type, error_message, trace))
         pipe.send((None, False))
     finally:
         env.close()
