@@ -158,7 +158,7 @@ def make(
             )
 
     if apply_api_compatibility or (
-        apply_api_compatibility is None and env_spec.apply_api_compatibility
+        apply_api_compatibility is None and getattr(env_spec, 'apply_api_compatibility', False)
     ):
         # If we use the compatibility layer, we treat the render mode explicitly and don't pass it to the env creator
         render_mode = env_spec_kwargs.pop('render_mode', None)
@@ -187,9 +187,7 @@ def make(
         nondeterministic=env_spec.nondeterministic,
         max_episode_steps=None,
         order_enforce=False,
-        autoreset=False,
         disable_env_checker=True,
-        apply_api_compatibility=False,
         kwargs=env_spec_kwargs,
         additional_wrappers=(),
         vector_entry_point=env_spec.vector_entry_point,
@@ -210,7 +208,7 @@ def make(
 
     # Add step API wrapper
     if apply_api_compatibility is True or (
-        apply_api_compatibility is None and env_spec.apply_api_compatibility is True
+        apply_api_compatibility is None and getattr(env_spec, 'apply_api_compatibility', False) is True
     ):
         if EnvCompatibility is not None:
             env = EnvCompatibility(env, render_mode)
@@ -232,7 +230,7 @@ def make(
         env = SafeTimeLimit(env, env_spec.max_episode_steps)
 
     # Add the auto-reset wrapper
-    if autoreset is True or (autoreset is None and env_spec.autoreset is True):
+    if autoreset is True or (autoreset is None and getattr(env_spec, 'autoreset', False) is True):
         env = SafeAutoResetWrapper(env)
 
     for wrapper_spec in env_spec.additional_wrappers[num_prior_wrappers:]:

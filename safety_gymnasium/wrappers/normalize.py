@@ -24,7 +24,7 @@ except ImportError:
     try:
         from gymnasium.utils.running_mean_std import RunningMeanStd
     except ImportError:
-        from gymnasium.wrappers.normalize import RunningMeanStd
+        from gymnasium.wrappers.utils import RunningMeanStd
 
 
 class SafeNormalizeObservation(NormalizeObservation):
