@@ -37,12 +37,9 @@ __all__ = ['AsyncVectorEnv']
 class SafetyAsyncVectorEnv(AsyncVectorEnv):
     """The async vectorized environment for Safety-Gymnasium."""
 
-    # pylint: disable-next=too-many-arguments
     def __init__(
         self,
         env_fns: Sequence[callable],
-        observation_space: gymnasium.Space | None = None,
-        action_space: gymnasium.Space | None = None,
         shared_memory: bool = True,
         copy: bool = True,
         context: str | None = None,
@@ -53,8 +50,6 @@ class SafetyAsyncVectorEnv(AsyncVectorEnv):
 
         Args:
             env_fns: A list of callable functions that create the environments.
-            observation_space: The observation space of the environment.
-            action_space: The action space of the environment.
             shared_memory: Whether to use shared memory for communication.
             copy: Whether to copy the observation.
             context: The context type of multiprocessing.
@@ -65,8 +60,6 @@ class SafetyAsyncVectorEnv(AsyncVectorEnv):
         target = worker or target
         super().__init__(
             env_fns,
-            observation_space,
-            action_space,
             shared_memory,
             copy,
             context,

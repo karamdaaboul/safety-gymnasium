@@ -37,12 +37,10 @@ class SafetySyncVectorEnv(SyncVectorEnv):
     def __init__(
         self,
         env_fns: Iterator[Callable[[], Env]],
-        observation_space: Space | None = None,
-        action_space: Space | None = None,
         copy: bool = True,
     ) -> None:
         """Initializes the vectorized safe environment."""
-        super().__init__(env_fns, observation_space, action_space, copy)
+        super().__init__(env_fns, copy)
         self._costs = np.zeros((self.num_envs,), dtype=np.float64)
 
     def render(self) -> np.ndarray:
