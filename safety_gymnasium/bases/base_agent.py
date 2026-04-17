@@ -251,7 +251,7 @@ class BaseAgent(abc.ABC):  # pylint: disable=too-many-instance-attributes
                 self.engine.model.sensor(sensor_id).objtype
                 == mujoco.mjtObj.mjOBJ_JOINT  # pylint: disable=no-member
             ):  # pylint: disable=no-member
-                joint_id = self.engine.model.sensor(sensor_id).objid
+                joint_id = self.engine.model.sensor(sensor_id).objid.item()
                 joint_type = self.engine.model.jnt(joint_id).type
                 if joint_type == mujoco.mjtJoint.mjJNT_HINGE:  # pylint: disable=no-member
                     if sensor_type == mujoco.mjtSensor.mjSENS_JOINTPOS:  # pylint: disable=no-member
