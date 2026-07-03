@@ -569,6 +569,19 @@ class Underlying(abc.ABC):  # pylint: disable=too-many-instance-attributes
         | gymnasium.envs.mujoco.mujoco_rendering.RenderContextOffscreen
     ):
         self.viewer = self._viewers.get(mode)
+        if (
+            self.viewer is not None
+            and mode in {'rgb_array', 'depth_array'}
+            and (
+                self.viewer.viewport.width != self.model.vis.global_.offwidth
+                or self.viewer.viewport.height != self.model.vis.global_.offheight
+            )
+        ):
+            # Offscreen framebuffer size is fixed at creation; recreate on size change
+            # (e.g. 64x64 vision observations interleaved with full-size render() calls).
+            self.viewer.free()
+            del self._viewers[mode]
+            self.viewer = None
         if self.viewer is None:
             if mode == 'human':
                 self.viewer = KeyboardViewer(
@@ -577,7 +590,12 @@ class Underlying(abc.ABC):  # pylint: disable=too-many-instance-attributes
                     self.agent.keyboard_control_callback,
                 )
             elif mode in {'rgb_array', 'depth_array'}:
-                self.viewer = OffScreenViewer(self.model, self.data)
+                self.viewer = OffScreenViewer(
+                    self.model,
+                    self.data,
+                    int(self.model.vis.global_.offwidth),
+                    int(self.model.vis.global_.offheight),
+                )
             else:
                 raise AttributeError(f'Unexpected mode: {mode}')
 
