@@ -60,6 +60,7 @@ Safety-Gymnasium is a standard API for safe reinforcement learning, and a divers
 
    api/bases
    api/builder
+   api/wrappers
    api/utils
 
 

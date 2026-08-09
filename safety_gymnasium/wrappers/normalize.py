@@ -14,58 +14,116 @@
 # ==============================================================================
 """Wrapper for normalizing the output of an environment."""
 
+from __future__ import annotations
+
+from typing import Any
 
 import gymnasium
 import numpy as np
-try:
-    from gymnasium.wrappers.normalize import NormalizeObservation, NormalizeReward, RunningMeanStd
-except ImportError:
-    from gymnasium.wrappers import NormalizeObservation, NormalizeReward
-    try:
-        from gymnasium.utils.running_mean_std import RunningMeanStd
-    except ImportError:
-        from gymnasium.wrappers.utils import RunningMeanStd
+
+from safety_gymnasium.utils.normalizer import MeanStdNormalizer, RunningMeanStd
 
 
-class SafeNormalizeObservation(NormalizeObservation):
-    """This wrapper will normalize observations as Gymnasium's NormalizeObservation wrapper does."""
+class SafeNormalizeObservation(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs):
+    """Normalize observations by a running mean and standard deviation.
 
-    def step(self, action):
-        """Steps through the environment and normalizes the observation."""
-        obs, rews, costs, terminateds, truncateds, infos = self.env.step(action)
-        obs = self.normalize(obs) if self.is_vector_env else self.normalize(np.array([obs]))[0]
-        if 'final_observation' in infos:
-            final_obs_slice = infos['_final_observation'] if self.is_vector_env else slice(None)
-            infos['original_final_observation'] = infos['final_observation']
-            infos['final_observation'][final_obs_slice] = self.normalize(
-                infos['final_observation'][final_obs_slice],
-            )
-        return obs, rews, costs, terminateds, truncateds, infos
+    The running statistics are updated from every observation the wrapper returns, and
+    normalized values are clipped to ``[-clip, clip]``.
 
+    Evaluation must not move the statistics, so call :meth:`freeze` before evaluating and
+    :meth:`unfreeze` afterwards. To keep a training and an evaluation environment in sync,
+    build one and hand its :attr:`normalizer` to the other::
 
-class SafeNormalizeReward(NormalizeReward):
-    """This wrapper will normalize rewards as Gymnasium's NormalizeObservation wrapper does."""
+        train_env = SafeNormalizeObservation(safety_gymnasium.make(env_id))
+        eval_env = SafeNormalizeObservation(safety_gymnasium.make(env_id))
+        eval_env.normalizer = train_env.normalizer
+        eval_env.freeze()
 
-    def step(self, action):
-        """Steps through the environment, normalizing the rewards returned."""
-        obs, rews, costs, terminateds, truncateds, infos = self.env.step(action)
-        if not self.is_vector_env:
-            rews = np.array([rews])
-        self.returns = self.returns * self.gamma * (1 - terminateds) + rews
-        rews = self.normalize(rews)
-        if not self.is_vector_env:
-            rews = rews[0]
-        return obs, rews, costs, terminateds, truncateds, infos
-
-
-class SafeNormalizeCost(gymnasium.core.Wrapper, gymnasium.utils.RecordConstructorArgs):
-    r"""This wrapper will normalize immediate costs s.t. their exponential moving average has a fixed variance.
-
-    The exponential moving average will have variance :math:`(1 - \gamma)^2`.
+    Use :meth:`get_stats` and :meth:`set_stats` to persist the statistics alongside a
+    policy checkpoint; a policy restored without them sees a different input distribution
+    than it was trained on.
 
     Note:
-        The scaling depends on past trajectories and costs will not be scaled correctly if the wrapper was newly
-        instantiated or the policy was changed recently.
+        Only ``Box`` observation spaces are supported. For pixel observations, whose
+        per-channel statistics are not meaningful in the same way, see
+        :class:`~safety_gymnasium.wrappers.SafePixelObservation` instead.
+    """
+
+    def __init__(
+        self,
+        env: gymnasium.Env,
+        clip: float = 50.0,
+        epsilon: float = 1e-20,
+    ) -> None:
+        """Initialize an instance of :class:`SafeNormalizeObservation`.
+
+        Args:
+            env (gymnasium.Env): The environment to apply the wrapper to.
+            clip (float): Normalized observations are clipped to ``[-clip, clip]``.
+            epsilon (float): Stability term added to the variance before taking the
+                square root.
+        """
+        gymnasium.utils.RecordConstructorArgs.__init__(self, clip=clip, epsilon=epsilon)
+        gymnasium.Wrapper.__init__(self, env)
+
+        if not isinstance(self.observation_space, gymnasium.spaces.Box):
+            raise TypeError(
+                'SafeNormalizeObservation requires a Box observation space, got '
+                f'{type(self.observation_space).__name__}.',
+            )
+
+        self.normalizer = MeanStdNormalizer(clip=clip, epsilon=epsilon, read_only=False)
+        self.observation_space = gymnasium.spaces.Box(
+            -clip,
+            clip,
+            self.observation_space.shape,
+            dtype=self.observation_space.dtype,
+        )
+
+    def freeze(self) -> None:
+        """Stop updating the running statistics, e.g. while evaluating."""
+        self.normalizer.set_read_only()
+
+    def unfreeze(self) -> None:
+        """Resume updating the running statistics."""
+        self.normalizer.unset_read_only()
+
+    def get_stats(self) -> dict[str, Any] | None:
+        """Return the running statistics for checkpointing."""
+        return self.normalizer.state_dict()
+
+    def set_stats(self, state: dict[str, Any] | None) -> None:
+        """Restore running statistics produced by :meth:`get_stats`."""
+        self.normalizer.load_state_dict(state)
+
+    def normalize(self, obs: np.ndarray) -> np.ndarray:
+        """Normalize a single observation, updating the statistics unless frozen."""
+        return self.normalizer(np.expand_dims(obs, axis=0))[0].astype(
+            self.observation_space.dtype,
+        )
+
+    def reset(self, **kwargs):
+        """Reset the environment and normalize the initial observation."""
+        obs, info = self.env.reset(**kwargs)
+        return self.normalize(obs), info
+
+    def step(self, action):
+        """Step the environment and normalize the observation."""
+        obs, reward, cost, terminated, truncated, info = self.env.step(action)
+        if 'final_observation' in info:
+            info['original_final_observation'] = info['final_observation']
+            info['final_observation'] = self.normalize(info['final_observation'])
+        return self.normalize(obs), reward, cost, terminated, truncated, info
+
+
+class SafeNormalizeReward(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs):
+    r"""Scale rewards so that the exponential moving average of the return has fixed variance.
+
+    The moving average has variance :math:`(1 - \gamma)^2`.
+
+    Note:
+        The scaling depends on past trajectories, so rewards will not be scaled correctly
+        if the wrapper was newly instantiated or the policy changed recently.
     """
 
     def __init__(
@@ -74,35 +132,73 @@ class SafeNormalizeCost(gymnasium.core.Wrapper, gymnasium.utils.RecordConstructo
         gamma: float = 0.99,
         epsilon: float = 1e-8,
     ) -> None:
-        """This wrapper will normalize immediate costs s.t. their exponential moving average has a fixed variance.
+        """Initialize an instance of :class:`SafeNormalizeReward`.
 
         Args:
-            env (env): The environment to apply the wrapper
-            epsilon (float): A stability parameter
-            gamma (float): The discount factor that is used in the exponential moving average.
+            env (gymnasium.Env): The environment to apply the wrapper to.
+            gamma (float): Discount factor used in the exponential moving average.
+            epsilon (float): A stability parameter.
         """
         gymnasium.utils.RecordConstructorArgs.__init__(self, gamma=gamma, epsilon=epsilon)
         gymnasium.Wrapper.__init__(self, env)
 
-        self.num_envs = getattr(env, 'num_envs', 1)
-        self.is_vector_env = getattr(env, 'is_vector_env', False)
         self.return_rms = RunningMeanStd(shape=())
-        self.returns = np.zeros(self.num_envs)
+        self.returns = np.zeros(1)
         self.gamma = gamma
         self.epsilon = epsilon
 
     def step(self, action):
-        """Steps through the environment, normalizing the costs returned."""
-        obs, rews, costs, terminateds, truncateds, infos = self.env.step(action)
-        if not self.is_vector_env:
-            costs = np.array([costs])
-        self.returns = self.returns * self.gamma * (1 - terminateds) + costs
-        costs = self.normalize(costs)
-        if not self.is_vector_env:
-            costs = costs[0]
-        return obs, rews, costs, terminateds, truncateds, infos
+        """Step the environment, normalizing the reward returned."""
+        obs, reward, cost, terminated, truncated, info = self.env.step(action)
+        self.returns = self.returns * self.gamma * (1 - float(terminated)) + reward
+        reward = self.normalize(np.array([reward]))[0]
+        return obs, reward, cost, terminated, truncated, info
 
-    def normalize(self, costs):
-        """Normalizes the costs with the running mean costs and their variance."""
+    def normalize(self, rewards: np.ndarray) -> np.ndarray:
+        """Normalize rewards by the standard deviation of the running returns."""
+        self.return_rms.update(self.returns)
+        return rewards / np.sqrt(self.return_rms.var + self.epsilon)
+
+
+class SafeNormalizeCost(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs):
+    r"""Scale costs so that the exponential moving average of the cost-return has fixed variance.
+
+    The moving average has variance :math:`(1 - \gamma)^2`.
+
+    Note:
+        The scaling depends on past trajectories, so costs will not be scaled correctly if
+        the wrapper was newly instantiated or the policy changed recently.
+    """
+
+    def __init__(
+        self,
+        env: gymnasium.Env,
+        gamma: float = 0.99,
+        epsilon: float = 1e-8,
+    ) -> None:
+        """Initialize an instance of :class:`SafeNormalizeCost`.
+
+        Args:
+            env (gymnasium.Env): The environment to apply the wrapper to.
+            gamma (float): Discount factor used in the exponential moving average.
+            epsilon (float): A stability parameter.
+        """
+        gymnasium.utils.RecordConstructorArgs.__init__(self, gamma=gamma, epsilon=epsilon)
+        gymnasium.Wrapper.__init__(self, env)
+
+        self.return_rms = RunningMeanStd(shape=())
+        self.returns = np.zeros(1)
+        self.gamma = gamma
+        self.epsilon = epsilon
+
+    def step(self, action):
+        """Step the environment, normalizing the cost returned."""
+        obs, reward, cost, terminated, truncated, info = self.env.step(action)
+        self.returns = self.returns * self.gamma * (1 - float(terminated)) + cost
+        cost = self.normalize(np.array([cost]))[0]
+        return obs, reward, cost, terminated, truncated, info
+
+    def normalize(self, costs: np.ndarray) -> np.ndarray:
+        """Normalize costs by the standard deviation of the running cost-returns."""
         self.return_rms.update(self.returns)
         return costs / np.sqrt(self.return_rms.var + self.epsilon)

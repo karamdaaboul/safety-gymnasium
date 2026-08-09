@@ -18,8 +18,10 @@ from typing import Callable
 
 import gymnasium
 
+from safety_gymnasium.wrappers.action_repeat import SafeActionRepeat
 from safety_gymnasium.wrappers.autoreset import SafeAutoResetWrapper
 from safety_gymnasium.wrappers.env_checker import SafePassiveEnvChecker
+from safety_gymnasium.wrappers.goal_terminal import SafeGoalMetTerminal
 from safety_gymnasium.wrappers.gymnasium_conversion import (
     Gymnasium2SafetyGymnasium,
     SafetyGymnasium2Gymnasium,
@@ -29,6 +31,7 @@ from safety_gymnasium.wrappers.normalize import (
     SafeNormalizeObservation,
     SafeNormalizeReward,
 )
+from safety_gymnasium.wrappers.pixel_observation import SafePixelObservation
 from safety_gymnasium.wrappers.rescale_action import SafeRescaleAction
 from safety_gymnasium.wrappers.time_limit import SafeTimeLimit
 from safety_gymnasium.wrappers.unsqueeze import SafeUnsqueeze
@@ -36,11 +39,14 @@ from safety_gymnasium.wrappers.unsqueeze import SafeUnsqueeze
 
 __all__ = [
     'Gymnasium2SafetyGymnasium',
+    'SafeActionRepeat',
     'SafeAutoResetWrapper',
+    'SafeGoalMetTerminal',
     'SafeNormalizeCost',
     'SafeNormalizeObservation',
     'SafeNormalizeReward',
     'SafePassiveEnvChecker',
+    'SafePixelObservation',
     'SafeRescaleAction',
     'SafeTimeLimit',
     'SafeUnsqueeze',
