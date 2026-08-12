@@ -14,6 +14,7 @@
 # ==============================================================================
 """Test the FCSRL-style training-setup wrappers."""
 
+import gymnasium
 import numpy as np
 import pytest  # pylint: disable=import-error
 
@@ -22,6 +23,7 @@ import safety_gymnasium
 from safety_gymnasium.utils.normalizer import MeanStdNormalizer
 from safety_gymnasium.wrappers import (
     SafeActionRepeat,
+    SafeCostLimitCurriculum,
     SafeGoalMetTerminal,
     SafeNormalizeCost,
     SafeNormalizeObservation,
@@ -262,19 +264,36 @@ def test_normalize_observation_respects_clip_and_freeze():
 
 
 def test_normalize_observation_shares_statistics():
-    """A training and an evaluation env can share one normalizer."""
+    """A training and an evaluation env can share one normalizer.
+
+    Freezing the evaluation env must not stop the training env from updating the
+    shared statistics, and the evaluation env must not contribute to them.
+    """
     train_env = SafeNormalizeObservation(safety_gymnasium.make(ENV_ID))
     eval_env = SafeNormalizeObservation(safety_gymnasium.make(ENV_ID))
     eval_env.normalizer = train_env.normalizer
     eval_env.freeze()
 
     train_env.reset(seed=0)
+    start = train_env.get_stats()['count']
     for _ in range(8):
         train_env.step(train_env.action_space.sample())
+    after_training = train_env.get_stats()['count']
+
+    assert after_training == pytest.approx(
+        start + 8,
+    ), 'Training env stopped updating the statistics when the eval env was frozen.'
+    assert not np.allclose(
+        train_env.get_stats()['mean'],
+        0.0,
+    ), 'Statistics never moved, so normalization silently degenerated to clipping.'
 
     eval_env.reset(seed=0)
-    assert (
-        eval_env.get_stats()['count'] == train_env.get_stats()['count']
+    for _ in range(8):
+        eval_env.step(eval_env.action_space.sample())
+
+    assert train_env.get_stats()['count'] == pytest.approx(
+        after_training,
     ), 'Frozen evaluation env must not update the shared statistics.'
 
 
@@ -341,6 +360,402 @@ def test_pixel_observation_requires_a_task():
     """Velocity environments have no task to render from."""
     with pytest.raises(TypeError, match='requires an environment with a `task`'):
         SafePixelObservation(safety_gymnasium.make('SafetyHalfCheetahVelocity-v1'))
+
+
+# ==============================================================================
+# SafeCostLimitCurriculum
+# ==============================================================================
+
+
+def _curriculum_env(max_episode_steps=10, **kwargs):
+    """Build a short-episode curriculum env; kwargs override the defaults."""
+    params = {
+        'initial_cost_limit': 100.0,
+        'min_cost_limit': 10.0,
+        'decrement': 20.0,
+        'success_threshold': 0.0,
+        'window': 1,
+    }
+    params.update(kwargs)
+    return SafeCostLimitCurriculum(
+        safety_gymnasium.make(ENV_ID, max_episode_steps=max_episode_steps),
+        **params,
+    )
+
+
+def _run_episodes(env, n_episodes):
+    """Run random episodes, resetting between them; return each boundary step's info."""
+    boundary_infos = []
+    for _ in range(n_episodes):
+        while True:
+            _, _, _, terminated, truncated, info = env.step(env.action_space.sample())
+            if terminated or truncated:
+                boundary_infos.append(info)
+                env.reset()
+                break
+    return boundary_infos
+
+
+def test_cost_limit_curriculum_rejects_invalid_args():
+    """A misordered or degenerate curriculum is a configuration error."""
+    with pytest.raises(ValueError, match='min_cost_limit must not exceed'):
+        _curriculum_env(initial_cost_limit=10.0, min_cost_limit=20.0)
+    with pytest.raises(ValueError, match='decrement must be positive'):
+        _curriculum_env(decrement=0.0)
+    with pytest.raises(ValueError, match='success_threshold must be non-negative'):
+        _curriculum_env(success_threshold=-1.0)
+    with pytest.raises(ValueError, match='window must be a positive integer'):
+        _curriculum_env(window=0)
+
+
+def test_cost_limit_reported_on_reset_and_step():
+    """The current limit appears in info on reset and step, and nothing else changes."""
+    action = np.zeros(safety_gymnasium.make(ENV_ID).action_space.shape, dtype=np.float64)
+
+    unwrapped = safety_gymnasium.make(ENV_ID)
+    unwrapped.reset(seed=0)
+    _, expected_reward, expected_cost, _, _, _ = unwrapped.step(action)
+
+    env = SafeCostLimitCurriculum(
+        safety_gymnasium.make(ENV_ID),
+        initial_cost_limit=100.0,
+        min_cost_limit=10.0,
+        decrement=20.0,
+        success_threshold=1.5,
+        window=20,
+    )
+    _, info = env.reset(seed=0)
+    assert info['cost_limit'] == pytest.approx(100.0)
+    assert env.cost_limit == pytest.approx(100.0)
+
+    _, reward, cost, terminated, truncated, info = env.step(action)
+    assert info['cost_limit'] == pytest.approx(100.0)
+    assert reward == pytest.approx(expected_reward), 'The wrapper must not alter the reward.'
+    assert cost == pytest.approx(expected_cost), 'The wrapper must not alter the cost.'
+    assert terminated is False
+    assert truncated is False
+
+
+def test_cost_limit_decays_on_success():
+    """Each successful window steps the limit down by the decrement."""
+    env = _curriculum_env()  # window=1, threshold=0: every episode advances the stage
+    env.reset(seed=0)
+
+    boundary_infos = _run_episodes(env, 3)
+
+    assert env.cost_limit == pytest.approx(40.0), 'Expected 100 - 3 * 20 after 3 episodes.'
+    assert boundary_infos[0]['cost_limit'] == pytest.approx(
+        80.0,
+    ), 'The boundary step must already report the newly decayed limit.'
+
+
+def test_cost_limit_holds_below_threshold():
+    """An unreachable threshold leaves the limit at its initial value."""
+    env = _curriculum_env(success_threshold=100.0)
+    env.reset(seed=0)
+
+    _run_episodes(env, 3)
+
+    assert env.cost_limit == pytest.approx(100.0)
+    assert env.window_mean is not None, 'Completed episodes must populate the window.'
+    assert env.window_mean < 100.0
+
+
+def test_cost_limit_floors_at_min():
+    """An overshooting decrement clamps to the minimum, where the curriculum goes inert."""
+    env = _curriculum_env(initial_cost_limit=25.0, min_cost_limit=5.0, decrement=10.0)
+    env.reset(seed=0)
+
+    limits = [info['cost_limit'] for info in _run_episodes(env, 4)]
+
+    assert limits == pytest.approx([15.0, 5.0, 5.0, 5.0])
+
+
+def test_window_clears_after_decrement():
+    """Each stage is judged on fresh episodes, not a still-sliding window."""
+    env = _curriculum_env(window=2)
+    env.reset(seed=0)
+
+    _run_episodes(env, 5)
+
+    # Decrements after episodes 2 and 4 only; a window that kept sliding would
+    # decrement after every episode from the second onwards (4 decrements).
+    assert env.cost_limit == pytest.approx(60.0), 'Expected 100 - 2 * 20 after 5 episodes.'
+
+
+def test_episode_goals_counts_and_reset_discards():
+    """Goals are counted within an episode and a mid-episode reset discards them."""
+    env = SafeCostLimitCurriculum(
+        safety_gymnasium.make(ENV_ID),
+        initial_cost_limit=100.0,
+        min_cost_limit=10.0,
+        decrement=20.0,
+        success_threshold=100.0,
+        window=1,
+    )
+    env.reset(seed=0)
+    # Enlarge the goal so that a random policy reaches it quickly.
+    env.unwrapped.task.goal.size = 2.5
+
+    _run_until_goal(env)
+    assert env.episode_goals == 1
+    assert env.window_mean is None, 'No episode has completed yet.'
+
+    _, info = env.reset()
+    assert env.episode_goals == 0
+    assert env.window_mean is None, 'A partial episode must not be recorded.'
+    assert env.cost_limit == pytest.approx(100.0)
+    assert info['cost_limit'] == pytest.approx(100.0)
+
+
+def test_cost_limit_state_round_trip():
+    """Saved curriculum state restores into a fresh wrapper."""
+    source = _curriculum_env(window=2)
+    source.reset(seed=0)
+    _run_episodes(source, 3)
+    for _ in range(4):  # a few steps into the next episode
+        source.step(source.action_space.sample())
+
+    restored = _curriculum_env(window=2)
+    restored.set_state(source.get_state())
+
+    assert restored.cost_limit == pytest.approx(source.cost_limit)
+    assert restored.episode_goals == source.episode_goals
+    assert restored.get_state() == source.get_state()
+
+
+class _FixedCostEnv(gymnasium.Env):
+    """Minimal 6-tuple env with a settable per-step cost, for exact gate tests.
+
+    Real rollouts give a cost that is random and usually zero over a short episode,
+    which cannot pin down a threshold comparison.
+    """
+
+    def __init__(self, cost_per_step, episode_len=5):
+        self.observation_space = gymnasium.spaces.Box(-1.0, 1.0, (1,), dtype=np.float64)
+        self.action_space = gymnasium.spaces.Box(-1.0, 1.0, (1,), dtype=np.float64)
+        self.cost_per_step = cost_per_step
+        self._episode_len = episode_len
+        self._step = 0
+
+    def reset(self, **kwargs):  # pylint: disable=unused-argument
+        self._step = 0
+        return np.zeros(1), {}
+
+    def step(self, action):  # pylint: disable=unused-argument
+        self._step += 1
+        # goal_met on every step, so the goal gate is never what blocks these tests.
+        return np.zeros(1), 0.0, self.cost_per_step, False, self._step >= self._episode_len, {'goal_met': True}
+
+
+def _cost_gated_env(cost_per_step, **kwargs):
+    """Curriculum over `_FixedCostEnv`; episode cost is 5 x cost_per_step."""
+    params = {
+        'initial_cost_limit': 100.0,
+        'min_cost_limit': 10.0,
+        'decrement': 20.0,
+        'success_threshold': 0.0,
+        'window': 1,
+        'gate_on_cost': True,
+    }
+    params.update(kwargs)
+    return SafeCostLimitCurriculum(_FixedCostEnv(cost_per_step), **params)
+
+
+def test_cost_gate_advances_when_within_budget():
+    """Episode cost under the limit leaves the goal gate in charge."""
+    env = _cost_gated_env(cost_per_step=1.0)  # episode cost 5, well under 100
+    env.reset()
+
+    _run_episodes(env, 3)
+
+    assert env.cost_limit == pytest.approx(40.0), 'Expected 100 - 3 * 20.'
+    assert env.window_cost_mean is None, 'The window clears on each advance.'
+
+
+def test_cost_gate_blocks_when_over_budget():
+    """A satisfied goal gate must not tighten a budget the agent is not meeting."""
+    env = _cost_gated_env(cost_per_step=30.0)  # episode cost 150, over 100
+    env.reset()
+
+    _run_episodes(env, 3)
+
+    assert env.cost_limit == pytest.approx(100.0), 'The limit must hold while cost exceeds it.'
+    assert env.window_cost_mean == pytest.approx(150.0)
+
+
+def test_cost_gate_is_opt_in():
+    """Without the flag the schedule stays open-loop, as before."""
+    env = _cost_gated_env(cost_per_step=30.0, gate_on_cost=False)
+    env.reset()
+
+    _run_episodes(env, 3)
+
+    assert env.cost_limit == pytest.approx(40.0), 'Cost is ignored unless gate_on_cost is set.'
+
+
+def test_cost_gate_reopens_when_cost_falls():
+    """The gate is a precondition, not a permanent stop."""
+    env = _cost_gated_env(cost_per_step=30.0)
+    env.reset()
+
+    _run_episodes(env, 2)
+    assert env.cost_limit == pytest.approx(100.0)
+
+    env.env.cost_per_step = 1.0  # the multiplier has done its work
+    _run_episodes(env, 2)
+
+    assert env.cost_limit == pytest.approx(60.0), 'Expected two advances once cost fits.'
+
+
+def test_cost_gate_state_round_trip():
+    """Cost-window state survives checkpointing."""
+    source = _cost_gated_env(cost_per_step=30.0, window=2)
+    source.reset()
+    _run_episodes(source, 1)
+
+    restored = _cost_gated_env(cost_per_step=30.0, window=2)
+    restored.set_state(source.get_state())
+
+    assert restored.window_cost_mean == pytest.approx(source.window_cost_mean)
+    assert restored.get_state() == source.get_state()
+
+
+class _ScriptedEnv(gymnasium.Env):
+    """Env whose episodes follow a scripted (goals, cost) cycle, for exact gate tests."""
+
+    EPISODE_LEN = 10
+
+    def __init__(self, script):
+        self.observation_space = gymnasium.spaces.Box(-1.0, 1.0, (1,), dtype=np.float64)
+        self.action_space = gymnasium.spaces.Box(-1.0, 1.0, (1,), dtype=np.float64)
+        self.script = script
+        self._episode = 0
+        self._step = 0
+
+    def reset(self, **kwargs):  # pylint: disable=unused-argument
+        self._step = 0
+        return np.zeros(1), {}
+
+    def step(self, action):  # pylint: disable=unused-argument
+        goals, cost = self.script[self._episode % len(self.script)]
+        self._step += 1
+        done = self._step >= self.EPISODE_LEN
+        # All the episode's cost lands on its first step; goals on its first `goals` steps.
+        info = {'goal_met': self._step <= goals}
+        emitted = float(cost) if self._step == 1 else 0.0
+        if done:
+            self._episode += 1
+        return np.zeros(1), 0.0, emitted, False, done, info
+
+
+def _scripted_curriculum(script, **kwargs):
+    params = {
+        'initial_cost_limit': 100.0,
+        'min_cost_limit': 10.0,
+        'decrement': 20.0,
+        'success_threshold': 3.0,
+        'window': 10,
+        'gate_on_cost': False,
+    }
+    params.update(kwargs)
+    return SafeCostLimitCurriculum(_ScriptedEnv(script), **params)
+
+
+def test_quantile_args_are_validated():
+    """A quantile outside [0, 1] is a configuration error."""
+    with pytest.raises(ValueError, match='success_quantile must lie in'):
+        _scripted_curriculum([(3, 0)], success_quantile=1.5)
+    with pytest.raises(ValueError, match='cost_quantile must lie in'):
+        _scripted_curriculum([(3, 0)], cost_quantile=-0.1)
+
+
+# Four episodes of 10 goals and six of none: mean 4.0 clears a threshold of 3.0 although
+# 60% of the episodes achieved nothing. The median of the same window is 0.
+_BIMODAL_GOALS = [(10, 0), (0, 0), (0, 0)]
+
+
+def test_mean_goal_gate_is_fooled_by_a_bimodal_window():
+    """The behaviour the quantile gate exists to fix, pinned so it cannot regress silently."""
+    env = _scripted_curriculum(_BIMODAL_GOALS)
+    env.reset()
+
+    _run_episodes(env, 10)
+
+    assert env.cost_limit == pytest.approx(80.0), 'The mean gate advances on a streak.'
+
+
+def test_median_goal_gate_rejects_a_bimodal_window():
+    """Sixty percent of episodes achieving nothing must not count as sustained success."""
+    env = _scripted_curriculum(_BIMODAL_GOALS, success_quantile=0.5)
+    env.reset()
+
+    _run_episodes(env, 10)
+
+    assert env.cost_limit == pytest.approx(100.0), 'Median 0 is under the threshold of 3.'
+    assert env.window_mean == pytest.approx(4.0), 'The mean gate would have cleared this window.'
+
+
+def test_median_goal_gate_accepts_a_consistent_window():
+    """Consistently clearing the bar still advances."""
+    env = _scripted_curriculum([(4, 0)], success_quantile=0.5)
+    env.reset()
+
+    _run_episodes(env, 10)
+
+    assert env.cost_limit == pytest.approx(80.0)
+
+
+def test_cost_quantile_rejects_a_bimodal_cost_window():
+    """A policy alternating idle and expensive episodes must not pass the cost gate."""
+    # Costs alternate 0 and 60: mean 30 <= limit 100 passes, but p75 = 60.
+    env = _scripted_curriculum(
+        [(4, 0), (4, 60)],
+        initial_cost_limit=40.0,
+        gate_on_cost=True,
+        cost_quantile=0.75,
+    )
+    env.reset()
+
+    _run_episodes(env, 10)
+
+    assert env.window_cost_mean == pytest.approx(30.0), 'The mean would clear a limit of 40.'
+    assert env.cost_limit == pytest.approx(40.0), 'p75 of the window is 60, over the limit.'
+
+
+def test_cost_quantile_accepts_a_consistent_cost_window():
+    """Consistently fitting the budget advances even under the strict quantile."""
+    env = _scripted_curriculum(
+        [(4, 30)],
+        initial_cost_limit=40.0,
+        gate_on_cost=True,
+        cost_quantile=0.75,
+    )
+    env.reset()
+
+    _run_episodes(env, 10)
+
+    assert env.cost_limit == pytest.approx(20.0)
+
+
+def test_summarize_matches_numpy_quantile():
+    """The gate statistic is a plain quantile; None keeps the legacy mean."""
+    values = [0, 1, 4, 9, 10]
+    assert SafeCostLimitCurriculum._summarize(values, None) == pytest.approx(4.8)
+    for q in (0.0, 0.25, 0.5, 0.75, 1.0):
+        assert SafeCostLimitCurriculum._summarize(values, q) == pytest.approx(
+            float(np.quantile(np.asarray(values, dtype=float), q)),
+        )
+
+
+def test_cost_limit_survives_action_repeat():
+    """Placed inside the repeat, the limit still reaches the outer info dict."""
+    env = SafeActionRepeat(_curriculum_env(max_episode_steps=1000), 4)
+    env.reset(seed=0)
+
+    _, _, _, _, _, info = env.step(env.action_space.sample())
+
+    assert info['cost_limit'] == pytest.approx(100.0)
 
 
 # ==============================================================================

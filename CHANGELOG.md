@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - chore: update link to PKU-Alignment org in PR [#55](https://github.com/PKU-Alignment/safety-gymnasium/pull/55).
 - chore(LICENSE): update license copyright owner.
 - feat: support environments wrappers in PR [#57](https://github.com/PKU-Alignment/safety-gymnasium/pull/57).
+- feat: add SafeCostLimitCurriculum wrapper for success-gated cost-limit curricula.
 
 ## [0.4.0] 2023-05-10
 

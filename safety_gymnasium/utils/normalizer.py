@@ -126,12 +126,22 @@ class MeanStdNormalizer:
         """Resume updating the running statistics."""
         self.read_only = False
 
-    def __call__(self, batch: np.ndarray) -> np.ndarray:
-        """Normalize a batch, updating the statistics first unless read-only."""
+    def __call__(self, batch: np.ndarray, update: bool | None = None) -> np.ndarray:
+        """Normalize a batch, updating the statistics first unless read-only.
+
+        Args:
+            batch (np.ndarray): Samples stacked along axis 0.
+            update (bool): Whether to fold this batch into the running statistics.
+                Defaults to ``not self.read_only``. Pass it explicitly when several
+                callers share one normalizer and each needs its own read/write policy,
+                so that one caller freezing itself cannot freeze the others.
+        """
         batch = np.asarray(batch)
         if self.rms is None:
             self.rms = RunningMeanStd(shape=(1, *batch.shape[1:]))
-        if not self.read_only:
+        if update is None:
+            update = not self.read_only
+        if update:
             self.rms.update(batch)
         normalized = (batch - self.rms.mean) / np.sqrt(self.rms.var + self.epsilon)
         return np.clip(normalized, -self.clip, self.clip)

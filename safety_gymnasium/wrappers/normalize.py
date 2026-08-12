@@ -73,6 +73,10 @@ class SafeNormalizeObservation(gymnasium.Wrapper, gymnasium.utils.RecordConstruc
             )
 
         self.normalizer = MeanStdNormalizer(clip=clip, epsilon=epsilon, read_only=False)
+        # Whether *this wrapper* updates the statistics. Kept here rather than on the
+        # normalizer so that freezing an evaluation environment cannot also freeze a
+        # training environment that shares the same normalizer object.
+        self._frozen = False
         self.observation_space = gymnasium.spaces.Box(
             -clip,
             clip,
@@ -80,13 +84,22 @@ class SafeNormalizeObservation(gymnasium.Wrapper, gymnasium.utils.RecordConstruc
             dtype=self.observation_space.dtype,
         )
 
+    @property
+    def frozen(self) -> bool:
+        """Whether this wrapper is currently updating the running statistics."""
+        return self._frozen
+
     def freeze(self) -> None:
-        """Stop updating the running statistics, e.g. while evaluating."""
-        self.normalizer.set_read_only()
+        """Stop updating the running statistics, e.g. while evaluating.
+
+        Only this wrapper stops contributing; another wrapper sharing the same
+        :attr:`normalizer` keeps updating it.
+        """
+        self._frozen = True
 
     def unfreeze(self) -> None:
         """Resume updating the running statistics."""
-        self.normalizer.unset_read_only()
+        self._frozen = False
 
     def get_stats(self) -> dict[str, Any] | None:
         """Return the running statistics for checkpointing."""
@@ -96,11 +109,13 @@ class SafeNormalizeObservation(gymnasium.Wrapper, gymnasium.utils.RecordConstruc
         """Restore running statistics produced by :meth:`get_stats`."""
         self.normalizer.load_state_dict(state)
 
-    def normalize(self, obs: np.ndarray) -> np.ndarray:
+    def normalize(self, obs: np.ndarray, update: bool = True) -> np.ndarray:
         """Normalize a single observation, updating the statistics unless frozen."""
-        return self.normalizer(np.expand_dims(obs, axis=0))[0].astype(
-            self.observation_space.dtype,
+        normalized = self.normalizer(
+            np.expand_dims(obs, axis=0),
+            update=update and not self._frozen,
         )
+        return normalized[0].astype(self.observation_space.dtype)
 
     def reset(self, **kwargs):
         """Reset the environment and normalize the initial observation."""
@@ -112,7 +127,9 @@ class SafeNormalizeObservation(gymnasium.Wrapper, gymnasium.utils.RecordConstruc
         obs, reward, cost, terminated, truncated, info = self.env.step(action)
         if 'final_observation' in info:
             info['original_final_observation'] = info['final_observation']
-            info['final_observation'] = self.normalize(info['final_observation'])
+            # Do not update: this observation was already counted when the wrapped
+            # environment returned it as `obs` on the previous step.
+            info['final_observation'] = self.normalize(info['final_observation'], update=False)
         return self.normalize(obs), reward, cost, terminated, truncated, info
 
 
@@ -147,11 +164,21 @@ class SafeNormalizeReward(gymnasium.Wrapper, gymnasium.utils.RecordConstructorAr
         self.gamma = gamma
         self.epsilon = epsilon
 
+    def reset(self, **kwargs):
+        """Reset the environment and the discounted-return accumulator."""
+        self.returns = np.zeros(1)
+        return self.env.reset(**kwargs)
+
     def step(self, action):
         """Step the environment, normalizing the reward returned."""
         obs, reward, cost, terminated, truncated, info = self.env.step(action)
-        self.returns = self.returns * self.gamma * (1 - float(terminated)) + reward
+        self.returns = self.returns * self.gamma + reward
         reward = self.normalize(np.array([reward]))[0]
+        # Navigation episodes almost always end by time limit rather than termination,
+        # so the accumulator has to be cleared on `truncated` too or it carries one
+        # episode's tail into the next for the whole run.
+        if terminated or truncated:
+            self.returns = np.zeros(1)
         return obs, reward, cost, terminated, truncated, info
 
     def normalize(self, rewards: np.ndarray) -> np.ndarray:
@@ -191,11 +218,19 @@ class SafeNormalizeCost(gymnasium.Wrapper, gymnasium.utils.RecordConstructorArgs
         self.gamma = gamma
         self.epsilon = epsilon
 
+    def reset(self, **kwargs):
+        """Reset the environment and the discounted cost-return accumulator."""
+        self.returns = np.zeros(1)
+        return self.env.reset(**kwargs)
+
     def step(self, action):
         """Step the environment, normalizing the cost returned."""
         obs, reward, cost, terminated, truncated, info = self.env.step(action)
-        self.returns = self.returns * self.gamma * (1 - float(terminated)) + cost
+        self.returns = self.returns * self.gamma + cost
         cost = self.normalize(np.array([cost]))[0]
+        # See SafeNormalizeReward.step: `truncated` ends an episode here too.
+        if terminated or truncated:
+            self.returns = np.zeros(1)
         return obs, reward, cost, terminated, truncated, info
 
     def normalize(self, costs: np.ndarray) -> np.ndarray:

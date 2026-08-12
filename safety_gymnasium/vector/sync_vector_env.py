@@ -78,7 +78,10 @@ class SafetySyncVectorEnv(SyncVectorEnv):
         actions = iterate(self.action_space, actions)
 
         infos = {}
-        for i, action in enumerate(actions):
+        # `strict=True` mirrors Gymnasium: a mis-sized action batch must raise rather
+        # than silently leave the trailing sub-environments unstepped and their
+        # rewards, costs and flags stale from the previous step.
+        for i, (action, _) in enumerate(zip(actions, self.envs, strict=True)):
             (
                 self._env_obs[i],
                 self._rewards[i],
@@ -93,6 +96,11 @@ class SafetySyncVectorEnv(SyncVectorEnv):
                 self._env_obs[i], env_info = self.envs[i].reset()
                 env_info['final_observation'] = final_obs
                 env_info['final_info'] = final_info
+                # Gymnasium's SAME_STEP consumers (RecordEpisodeStatistics, the
+                # vector observation wrappers) look for `final_obs`, and `_add_info`
+                # special-cases that key. Emit it alongside the `final_observation`
+                # name this package has always used.
+                env_info['final_obs'] = final_obs
 
             infos = self._add_info(infos, env_info, i)
 

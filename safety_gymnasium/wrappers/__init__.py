@@ -20,6 +20,7 @@ import gymnasium
 
 from safety_gymnasium.wrappers.action_repeat import SafeActionRepeat
 from safety_gymnasium.wrappers.autoreset import SafeAutoResetWrapper
+from safety_gymnasium.wrappers.cost_limit_curriculum import SafeCostLimitCurriculum
 from safety_gymnasium.wrappers.env_checker import SafePassiveEnvChecker
 from safety_gymnasium.wrappers.goal_terminal import SafeGoalMetTerminal
 from safety_gymnasium.wrappers.gymnasium_conversion import (
@@ -41,6 +42,7 @@ __all__ = [
     'Gymnasium2SafetyGymnasium',
     'SafeActionRepeat',
     'SafeAutoResetWrapper',
+    'SafeCostLimitCurriculum',
     'SafeGoalMetTerminal',
     'SafeNormalizeCost',
     'SafeNormalizeObservation',

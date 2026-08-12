@@ -28,6 +28,7 @@ import numpy as np
 from gymnasium.error import NoAsyncCallError
 from gymnasium.vector.async_vector_env import AsyncState, AsyncVectorEnv
 from gymnasium.vector.utils import concatenate, write_to_shared_memory
+from gymnasium.vector.vector_env import AutoresetMode
 
 from safety_gymnasium.vector.utils.tile_images import tile_images
 
@@ -66,6 +67,11 @@ class SafetyAsyncVectorEnv(AsyncVectorEnv):
             context,
             daemon,
             worker=target,
+            # The workers below reset a sub-environment in the same step that ends its
+            # episode, so declare that rather than inheriting Gymnasium's NEXT_STEP
+            # default. Consumers that dispatch on `metadata['autoreset_mode']` would
+            # otherwise attribute episode boundaries one step late.
+            autoreset_mode=AutoresetMode.SAME_STEP,
         )
 
     def get_images(self):
@@ -174,6 +180,9 @@ def _worker(
                     observation, info = env.reset()
                     info['final_observation'] = old_observation
                     info['final_info'] = old_info
+                    # Gymnasium's SAME_STEP consumers look for `final_obs`; emit it
+                    # alongside the `final_observation` name used historically here.
+                    info['final_obs'] = old_observation
                 pipe.send(((observation, reward, cost, terminated, truncated, info), True))
             elif command == 'close':
                 pipe.send((None, True))
@@ -242,6 +251,9 @@ def _worker_shared_memory(
                     observation, info = env.reset()
                     info['final_observation'] = old_observation
                     info['final_info'] = old_info
+                    # Gymnasium's SAME_STEP consumers look for `final_obs`; emit it
+                    # alongside the `final_observation` name used historically here.
+                    info['final_obs'] = old_observation
                 write_to_shared_memory(observation_space, index, observation, shared_memory)
                 pipe.send(((None, reward, cost, terminated, truncated, info), True))
             elif command == 'close':

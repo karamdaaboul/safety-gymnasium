@@ -24,6 +24,10 @@ import gymnasium
 #: Info keys that are aggregated by logical ``or`` rather than by summing.
 BOOLEAN_INFO_KEYS = ('goal_met', 'pseudo_terminated')
 
+#: ``cost_*``-prefixed keys that are levels rather than per-step increments, so they take
+#: the overwrite rule instead of being summed.
+LEVEL_INFO_KEYS = ('cost_limit',)
+
 
 def merge_info(accumulator: dict[str, Any], step_info: dict[str, Any]) -> None:
     """Merge one simulator step's ``info`` into an accumulator, in place.
@@ -34,13 +38,15 @@ def merge_info(accumulator: dict[str, Any], step_info: dict[str, Any]) -> None:
     - ``cost_*`` entries (``cost_sum``, ``cost_hazards``, ``cost_exception``, ...) are
       **summed**, exactly like the returned ``cost``. Each is an indicator in
       :math:`\\{0, 1\\}` per simulator step, so summing keeps an episode's cost total equal
-      to what the unrepeated environment would report.
+      to what the unrepeated environment would report. :data:`LEVEL_INFO_KEYS` are exempt:
+      ``cost_limit`` is a level, not an increment, and summing it would scale it by the
+      repeat.
     - :data:`BOOLEAN_INFO_KEYS` are combined with logical ``or``.
     - Anything else is overwritten by the most recent simulator step, matching the
       returned observation.
     """
     for key, value in step_info.items():
-        if key.startswith('cost_'):
+        if key.startswith('cost_') and key not in LEVEL_INFO_KEYS:
             accumulator[key] = accumulator.get(key, 0.0) + value
         elif key in BOOLEAN_INFO_KEYS:
             accumulator[key] = bool(accumulator.get(key, False)) or bool(value)

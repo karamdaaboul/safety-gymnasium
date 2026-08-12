@@ -94,6 +94,55 @@ simulator steps.
   {class}`~safety_gymnasium.wrappers.SafePixelObservation` calls the public
   {meth}`safety_gymnasium.bases.underlying.Underlying.render` with an explicit size.
 
+### Cost-limit curriculum
+
+A safe-RL curriculum starts with a loose constraint budget so the agent can learn the
+task at all, then tightens it as competence grows. The wrapper below tracks mean goals
+per episode over a window of completed episodes and steps a cost limit down each time
+the mean reaches a threshold, clamped at a minimum. It is *expose-only*: nothing in the
+environment's returns changes. The training loop reads `env.cost_limit` (or
+`info['cost_limit']`, present on every reset and step) and feeds it to its constraint,
+for example a Lagrangian budget.
+
+```{eval-rst}
+.. autoclass:: safety_gymnasium.wrappers.SafeCostLimitCurriculum
+```
+
+```python
+env = safety_gymnasium.make('SafetyPointGoal1-v0')
+env = SafeCostLimitCurriculum(
+    env,
+    initial_cost_limit=100.0,
+    min_cost_limit=25.0,
+    decrement=15.0,
+    success_threshold=1.5,
+    window=20,
+)
+env = SafeGoalMetTerminal(env)
+env = SafeActionRepeat(env, 4)
+```
+
+Persist the curriculum with the policy, or a restored checkpoint will resume at the
+initial limit:
+
+```python
+checkpoint['curriculum'] = env.get_state()
+...
+env.set_state(checkpoint['curriculum'])
+```
+
+#### Placement relative to action repeat and autoreset
+
+Place the wrapper **inside** {class}`~safety_gymnasium.wrappers.SafeActionRepeat`, as in
+the snippet above, so it observes every simulator step's `goal_met`. Outside the repeat,
+`goal_met` is OR-collapsed per agent step, so two goals reached within one repeat would
+count as one. Its `info['cost_limit']` still reaches the outer stack, because the limit
+only changes on the episode-ending simulator step, which is always the repeat's last.
+
+The wrapper also works outside {class}`~safety_gymnasium.wrappers.SafeAutoResetWrapper`:
+on the auto-resetting boundary step it reads the terminal step's `goal_met` from
+`info['final_info']`.
+
 ### Normalization
 
 ```{eval-rst}
@@ -111,6 +160,9 @@ eval_env = SafeNormalizeObservation(safety_gymnasium.make(env_id))
 eval_env.normalizer = train_env.normalizer
 eval_env.freeze()
 ```
+
+`freeze()` is per wrapper, not per normalizer, so freezing the evaluation environment
+leaves the training environment updating the shared statistics.
 
 Persist the statistics with the policy, or a restored checkpoint will see a different input
 distribution than it was trained on:
